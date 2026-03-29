@@ -209,6 +209,7 @@ class NovelMainAgent:
         outputs: list[str] = []
         current_chapter = self.state.latest_chapter_index()
         chapter_goal = self._chapter_goal(current_chapter)
+        risk_profile = self.state.chapter_risk_profile(current_chapter)
         self.log_progress(f"Reviewing chapter {current_chapter}.")
         aggregated_feedback: list[str] = []
         canon_change_votes = 0
@@ -225,10 +226,12 @@ class NovelMainAgent:
                     "chapter_index": current_chapter,
                     "main_snapshot": self.clean_context(),
                     "chapter_goal": chapter_goal,
+                    "chapter_risk": risk_profile,
                 },
                 constraints=[
                     "Flag concrete issues, not vague critiques.",
                     "If deviation is beneficial, explain why canon should change.",
+                    "If the chapter risk is medium or high, be extra strict about continuity and unresolved issues.",
                 ],
                 expected_output="Review findings in Chinese with clear actionable feedback.",
             )
@@ -264,6 +267,8 @@ class NovelMainAgent:
         return [
             f"chapter={current_chapter}",
             f"goal={chapter_goal or '未找到章节目标'}",
+            f"risk_level={risk_profile['level']}",
+            f"risk_score={risk_profile['score']}",
             f"review_path={review_path}",
             f"notes_path={notes_path}",
             f"next_action={action.value}",
@@ -272,6 +277,7 @@ class NovelMainAgent:
     async def _run_revision_stage(self) -> list[str]:
         current_chapter = self.state.latest_chapter_index()
         chapter_goal = self._chapter_goal(current_chapter)
+        risk_profile = self.state.chapter_risk_profile(current_chapter)
         self.log_progress(f"Revising chapter {current_chapter}.")
         deviation_action = self._resolve_deviation_action(
             1 if any("canon" in feedback.lower() for feedback in self.state.draft.latest_feedback) else 0,
@@ -285,10 +291,12 @@ class NovelMainAgent:
                 "chapter_index": current_chapter,
                 "main_snapshot": self.clean_context(),
                 "chapter_goal": chapter_goal,
+                "chapter_risk": risk_profile,
             },
             constraints=[
                 "Prefer revising the draft over modifying canon unless there is a superior creative deviation.",
                 "Keep revisions consistent with the existing authorial voice.",
+                "If chapter risk is medium or high, resolve continuity and open-question issues before polishing style.",
             ],
             expected_output="A revised Chinese chapter draft with any canon-change recommendation called out explicitly.",
             metadata={"deviation_action": deviation_action.value},
@@ -364,6 +372,8 @@ class NovelMainAgent:
         return [
             f"chapter={current_chapter}",
             f"goal={chapter_goal or '未找到章节目标'}",
+            f"risk_level={risk_profile['level']}",
+            f"risk_score={risk_profile['score']}",
             f"revision_path={revision_path}",
             f"notes_path={notes_path}",
             f"deviation_action={deviation_action.value}",
@@ -425,10 +435,17 @@ class NovelMainAgent:
     ) -> None:
         """Record canon evolution caused by a beneficial deviation."""
         patch = result.metadata.get("canon_patch")
+        if isinstance(patch, (dict, list)):
+            applied = self.state.apply_structured_canon_patch(patch, chapter_index=chapter_index)
+            if applied:
+                return
         if not patch:
             patch = f"Canon adjusted after chapter {chapter_index} revision."
-        self.state.canon.world_rules.append(patch)
-        self.state.log_canon_change(patch)
+        patch_text = str(patch).strip()
+        if not patch_text:
+            patch_text = f"Canon adjusted after chapter {chapter_index} revision."
+        self.state.canon.world_rules.append(patch_text)
+        self.state.log_canon_change(patch_text)
 
     async def _decide_chapter_convergence(
         self,

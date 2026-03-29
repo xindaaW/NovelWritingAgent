@@ -5,6 +5,9 @@
 - 前期 `canon` 生成与收敛
 - 章节写作、审核、修订、章节收敛
 - long-term memory 持久化与渐进式 `retrieve_memory`
+- prompt 级 memory budget 控制与风险感知审核
+- 本地语义检索 fallback 与 long-horizon memory 压缩
+- 结构化 `canon_patch`，支持章节修订反向更新 canon
 - 项目状态落盘与按 `project_id` 恢复续写
 - 无模型骨架调试和接入真实 LLM 的两种运行模式
 

@@ -9,7 +9,7 @@ from novel_writing_agent import NovelMainAgent, NovelMode, NovelProjectState, No
 from novel_writing_agent.agents import WritingSubAgent
 from novel_writing_agent.ideation import IdeationCoordinator
 from novel_writing_agent.memory import MemoryOrchestrator, WorkingMemoryBundle
-from novel_writing_agent.models import AgentExecutionRequest, AgentRole, AgentTaskKind, CanonAsset
+from novel_writing_agent.models import AgentExecutionRequest, AgentExecutionResult, AgentRole, AgentTaskKind, CanonAsset
 from novel_writing_agent.storage import ProjectArtifactStore
 from novel_writing_agent.tools import RetrieveMemoryTool
 from novel_writing_agent.retry import RetryConfig as RuntimeRetryConfig, coerce_retry_config
@@ -115,7 +115,8 @@ async def test_drafting_review_revision_updates_memory_and_completes_chapter(tmp
 
     state.stage = NovelStage.REVIEW
     review_outputs = await agent.run_stage()
-    assert len(review_outputs) == 5
+    assert any(item.startswith("risk_level=") for item in review_outputs)
+    assert any(item.startswith("risk_score=") for item in review_outputs)
     assert state.draft.latest_feedback
     assert state.draft.review_feedback_by_chapter[1]
     assert (tmp_path / state.project_id / "outputs/chapters/chapter_001_review.md").exists()
@@ -130,7 +131,8 @@ async def test_drafting_review_revision_updates_memory_and_completes_chapter(tmp
     assert state.memory.chapter_memory[1]
     assert (tmp_path / state.project_id / "outputs/chapters/chapter_001_revision.md").exists()
     assert (tmp_path / state.project_id / "outputs/memory/memory_overview.md").exists()
-    assert len(revision_outputs) == 7
+    assert any(item.startswith("risk_level=") for item in revision_outputs)
+    assert any(item.startswith("risk_score=") for item in revision_outputs)
 
 
 @pytest.mark.asyncio
@@ -810,10 +812,170 @@ async def test_writer_memory_bundle_applies_prompt_budget_caps():
     bundle = await MemoryOrchestrator().build_for_role(state, AgentRole.WRITER, chapter_index=3)
     canon_budget = MemoryOrchestrator.SECTION_BUDGETS["canon_context"]
     narrative_budget = MemoryOrchestrator.SECTION_BUDGETS["narrative_context"]
+    token_estimate = MemoryOrchestrator.estimate_bundle_tokens(bundle)
 
     assert sum(len(item) for item in bundle.canon_context) <= canon_budget.max_total_chars
     assert sum(len(item) for item in bundle.narrative_context) <= narrative_budget.max_total_chars
+    assert token_estimate["canon_context"] <= canon_budget.max_total_tokens
+    assert token_estimate["narrative_context"] <= narrative_budget.max_total_tokens
     assert any(item.endswith("...[truncated]") for item in bundle.canon_context + bundle.narrative_context)
+
+
+@pytest.mark.asyncio
+async def test_writer_revision_metadata_accepts_structured_canon_patch():
+    """Writer revisions should parse structured canon patches from JSON appendices."""
+    fake_response = """这一稿建议同步更新设定。
+
+```json
+{
+  "summary": "第2章让宿敌线提前显形。",
+  "should_update_canon": true,
+  "canon_update_reason": "新冲突更强，应该同步到 chapter outline。",
+  "canon_patch": {
+    "target_asset": "chapter_outline",
+    "section_key": "第2章：流亡求生。",
+    "content": "第2章：流亡求生，并首次明确宿敌在暗中布局。",
+    "reason": "把新暴露的主线冲突前置。"
+  }
+}
+```"""
+    agent = WritingSubAgent(
+        role=AgentRole.WRITER,
+        system_prompt="Writer system prompt",
+        llm_client=FakeLLM(fake_response),
+    )
+
+    result = await agent.execute(
+        request=AgentExecutionRequest(
+            role=agent.role,
+            task_kind=AgentTaskKind.REVISE,
+            objective="Revise chapter 2",
+            metadata={"deviation_action": "update_canon"},
+        ),
+        working_memory=WorkingMemoryBundle(),
+    )
+
+    assert isinstance(result.metadata["canon_patch"], dict)
+    assert result.metadata["canon_patch"]["target_asset"] == "chapter_outline"
+    assert "宿敌在暗中布局" in result.metadata["canon_patch"]["content"]
+
+
+def test_structured_canon_patch_updates_target_asset_sections(tmp_path: Path):
+    """Structured canon patches should update the targeted canon asset instead of only logging text."""
+    state = NovelProjectState(
+        project_id="canon-patch",
+        title="Canon Patch",
+        user_brief="brief",
+        mode=NovelMode.SHORT,
+    )
+    state.update_canon_asset(
+        CanonAsset.CHAPTER_OUTLINE,
+        "第1章：家族覆灭。\n第2章：流亡求生。",
+    )
+    agent = NovelMainAgent(state, artifact_workspace_root=tmp_path)
+    result = AgentExecutionResult(
+        role=AgentRole.WRITER,
+        task_kind=AgentTaskKind.REVISE,
+        output="修订完成",
+        metadata={
+            "canon_patch": {
+                "target_asset": "chapter_outline",
+                "section_key": "第2章：流亡求生。",
+                "content": "第2章：流亡求生，并首次明确宿敌在暗中布局。",
+                "reason": "把更强的对立线同步到分章规划。",
+            }
+        },
+    )
+
+    agent._apply_canon_patch_from_revision(2, result)
+
+    assert "宿敌在暗中布局" in state.canon_text(CanonAsset.CHAPTER_OUTLINE)
+    assert any("chapter_outline" in note for note in state.draft.canon_change_log)
+
+
+@pytest.mark.asyncio
+async def test_high_risk_chapter_expands_review_memory_scope():
+    """High-risk chapters should receive deeper review context than the default light pass."""
+    state = NovelProjectState(
+        project_id="risk-profile",
+        title="Risk Profile",
+        user_brief="brief",
+        mode=NovelMode.SHORT,
+    )
+    state.update_canon_asset(CanonAsset.CHAPTER_OUTLINE, "第1章：起点。\n第2章：失控。")
+    state.freeze_asset(CanonAsset.STORY_OUTLINE)
+    state.freeze_asset(CanonAsset.CHARACTER_PROFILES)
+    state.freeze_asset(CanonAsset.CHAPTER_OUTLINE)
+    state.store_chapter_draft(2, "正文")
+    state.store_chapter_summary(1, "上一章主角失去了盟友。")
+    state.add_review_feedback(2, [f"问题 {idx}" for idx in range(1, 7)])
+    state.draft.revision_rounds_by_chapter[2] = 2
+    state.draft.chapter_status[2] = "needs_revision"
+    state.log_canon_change("Applied structured canon patch to chapter_outline:第2章 from chapter 2")
+
+    profile = state.chapter_risk_profile(2)
+    bundle = await MemoryOrchestrator().build_for_role(state, AgentRole.CONTINUITY_REVIEWER, chapter_index=2)
+
+    assert profile["deep_review"] is True
+    assert profile["score"] >= 4
+    assert len(bundle.review_context) >= 6
+
+
+@pytest.mark.asyncio
+async def test_semantic_selector_falls_back_without_llm():
+    """When no selector LLM is available, local semantic ranking should still choose relevant canon sections."""
+    state = NovelProjectState(
+        project_id="semantic-selector",
+        title="Semantic Selector",
+        user_brief="brief",
+        mode=NovelMode.SHORT,
+    )
+    state.update_canon_asset(
+        CanonAsset.STORY_OUTLINE,
+        """# 故事大纲
+
+## 城市日常
+主角在压抑而重复的都市生活中逐渐麻木。
+
+## 宿敌暗线
+宿敌很早就在暗中布局，并通过旁支势力不断试探主角。
+""",
+    )
+
+    selected = await MemoryOrchestrator()._select_story_outline_sections(
+        state,
+        query="这一章要突出宿敌在暗中布局的压迫感。",
+        max_items=1,
+    )
+
+    assert len(selected) == 1
+    assert "宿敌很早就在暗中布局" in selected[0]
+
+
+@pytest.mark.asyncio
+async def test_long_horizon_memory_compression_feeds_retrieval_index():
+    """Older chapter summaries should be compressed into long-horizon recall entries."""
+    state = NovelProjectState(
+        project_id="compressed-memory",
+        title="Compressed Memory",
+        user_brief="brief",
+        mode=NovelMode.LONG,
+    )
+    state.update_canon_asset(
+        CanonAsset.CHAPTER_OUTLINE,
+        "\n".join(f"第{idx}章：章节 {idx}。" for idx in range(1, 10)),
+    )
+    for idx in range(1, 9):
+        state.store_chapter_summary(idx, f"第{idx}章里主角经历了关键转折，并留下新的悬念线索 {idx}。")
+
+    bundle = await MemoryOrchestrator().build_for_role(state, AgentRole.WRITER, chapter_index=9)
+
+    assert state.memory.compressed_narrative
+    assert any(item.startswith("第1-") or "长程摘要" in item for item in state.memory.compressed_narrative)
+    assert any(
+        entry["source"].startswith("compressed_narrative.")
+        for entry in bundle.retrieval_index["deep"]["narrative"]
+    )
 
 
 def test_artifact_store_atomic_writes_leave_no_temp_files(tmp_path: Path):

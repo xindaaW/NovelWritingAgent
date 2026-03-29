@@ -107,6 +107,7 @@ class MemoryState:
     world_memory: list[str] = field(default_factory=list)
     chapter_memory: dict[int, list[str]] = field(default_factory=dict)
     narrative_history: list[str] = field(default_factory=list)
+    compressed_narrative: list[str] = field(default_factory=list)
     review_memory: list[ReviewIssue] = field(default_factory=list)
     event_memory: list[MemoryEvent] = field(default_factory=list)
 
@@ -191,6 +192,7 @@ class NovelProjectState:
             state.memory.world_memory = list(memory.get("world_memory", []))
             state.memory.chapter_memory = cls._int_keys(memory.get("chapter_memory", {}))
             state.memory.narrative_history = list(memory.get("narrative_history", []))
+            state.memory.compressed_narrative = list(memory.get("compressed_narrative", []))
             state.memory.review_memory = [
                 ReviewIssue(**item) for item in memory.get("review_memory", []) if isinstance(item, dict)
             ]
@@ -210,6 +212,7 @@ class NovelProjectState:
             "world_memory": list(self.memory.world_memory),
             "chapter_memory": self._stringify_int_keys(self.memory.chapter_memory),
             "narrative_history": list(self.memory.narrative_history),
+            "compressed_narrative": list(self.memory.compressed_narrative),
             "review_memory": [asdict(item) for item in self.memory.review_memory],
             "event_memory": [asdict(item) for item in self.memory.event_memory],
         }
@@ -389,7 +392,9 @@ class NovelProjectState:
         """Persist summary memory for a chapter."""
         self.draft.chapter_summaries[chapter_index] = summary
         self.memory.narrative_history.append(summary)
+        self.memory.narrative_history = self.memory.narrative_history[-24:]
         self.memory.chapter_memory.setdefault(chapter_index, []).append(summary)
+        self._refresh_long_horizon_memory()
         self.record_memory_event(
             event_type="plot_event",
             summary=summary,
@@ -568,6 +573,121 @@ class NovelProjectState:
         self.draft.canon_change_log.append(note)
         self.stage_notes.append(note)
 
+    def apply_structured_canon_patch(
+        self,
+        patch: object,
+        chapter_index: int | None = None,
+    ) -> list[str]:
+        """Apply structured canon patches produced during chapter revision."""
+        if isinstance(patch, list):
+            applied: list[str] = []
+            for item in patch:
+                applied.extend(self.apply_structured_canon_patch(item, chapter_index=chapter_index))
+            return applied
+        if not isinstance(patch, dict):
+            return []
+
+        target_value = str(patch.get("target_asset", "")).strip()
+        if not target_value:
+            return []
+        try:
+            asset = CanonAsset(target_value)
+        except ValueError:
+            return []
+
+        content = str(patch.get("content") or patch.get("section_content") or "").strip()
+        if not content:
+            return []
+
+        section_key = str(patch.get("section_key", "")).strip()
+        reason = str(patch.get("reason") or patch.get("rationale") or "").strip()
+        normalized = self._normalize_structured_patch_content(asset, section_key, content)
+        self.update_canon_asset(asset, normalized)
+
+        summary = f"{asset.value}:{section_key or '<full>'}"
+        change_note = f"Applied structured canon patch to {summary}"
+        if chapter_index is not None:
+            change_note += f" from chapter {chapter_index}"
+        if reason:
+            change_note += f" ({reason})"
+        self.log_canon_change(change_note)
+        return [summary]
+
+    def chapter_risk_profile(self, chapter_index: int) -> dict[str, object]:
+        """Estimate whether a chapter deserves deeper review and memory retrieval."""
+        score = 0
+        factors: list[str] = []
+
+        open_issues = len(self.active_review_items(chapter_index=chapter_index, limit=20))
+        if open_issues >= 5:
+            score += 4
+            factors.append("dense_open_review_issues")
+        elif open_issues >= 3:
+            score += 3
+            factors.append("multiple_open_review_issues")
+        elif open_issues > 0:
+            score += 1
+            factors.append("has_open_review_issue")
+
+        revision_rounds = self.draft.revision_rounds_by_chapter.get(chapter_index, 0)
+        if revision_rounds >= 2:
+            score += 3
+            factors.append("multiple_revision_rounds")
+        elif revision_rounds == 1:
+            score += 1
+            factors.append("has_revision_history")
+
+        status = self.draft.chapter_status.get(chapter_index, "")
+        if status in {"needs_revision", "reviewed"}:
+            score += 2
+            factors.append(f"status_{status}")
+
+        open_questions = len(
+            [
+                event
+                for event in self.active_memory_events(
+                    chapter_index=chapter_index,
+                    event_types={"open_question"},
+                    limit=30,
+                )
+                if event.chapter_index == chapter_index
+            ]
+        )
+        if open_questions >= 3:
+            score += 2
+            factors.append("stacked_open_questions")
+        elif open_questions > 0:
+            score += 1
+            factors.append("has_open_question")
+
+        canon_deviations = sum(
+            1
+            for note in self.draft.canon_change_log[-10:]
+            if f"chapter {chapter_index}" in note.lower()
+        )
+        if canon_deviations:
+            score += 2
+            factors.append("recent_canon_deviation")
+
+        if chapter_index > 1 and not self.draft.chapter_summaries.get(chapter_index - 1, "").strip():
+            score += 1
+            factors.append("missing_previous_summary")
+
+        if score >= 7:
+            level = "high"
+        elif score >= 4:
+            level = "medium"
+        else:
+            level = "low"
+
+        return {
+            "chapter_index": chapter_index,
+            "score": score,
+            "level": level,
+            "deep_review": score >= 4,
+            "factors": factors,
+        }
+
     def _merge_draft_sections(
         self,
         existing_sections: dict[str, str],
@@ -601,6 +721,22 @@ class NovelProjectState:
         if scene_sections:
             return scene_sections
         return {"__full__": content}
+
+    @staticmethod
+    def _normalize_structured_patch_content(
+        asset: CanonAsset,
+        section_key: str,
+        content: str,
+    ) -> str:
+        normalized = content.strip()
+        if not normalized or not section_key:
+            return normalized
+        if normalized.startswith(section_key):
+            return normalized
+        if asset in {CanonAsset.STORY_OUTLINE, CanonAsset.CHARACTER_PROFILES}:
+            header = section_key if section_key.startswith("#") else f"## {section_key}"
+            return f"{header}\n{normalized}".strip()
+        return f"{section_key}\n{normalized}".strip()
 
     @staticmethod
     def _normalize_draft_text(text: str) -> str:
@@ -768,6 +904,34 @@ class NovelProjectState:
         if cls._contains_any(text, ("决定", "怀疑", "明白", "意识到", "不再", "开始", "发誓", "下定决心")):
             events.append(("character_state_change", text))
         return events
+
+    def _refresh_long_horizon_memory(self) -> None:
+        """Compress older chapter summaries into long-horizon recap capsules."""
+        chapter_items = sorted(self.draft.chapter_summaries.items())
+        if len(chapter_items) <= 6:
+            self.memory.compressed_narrative = []
+            return
+
+        older_items = chapter_items[:-4]
+        compressed: list[str] = []
+        window_size = 4
+        for start in range(0, len(older_items), window_size):
+            window = older_items[start : start + window_size]
+            if not window:
+                continue
+            start_chapter = window[0][0]
+            end_chapter = window[-1][0]
+            fragments = [self._compress_summary_fragment(summary) for _, summary in window]
+            compressed.append(
+                f"第{start_chapter}-{end_chapter}章长程摘要："
+                + " / ".join(fragment for fragment in fragments if fragment)
+            )
+        self.memory.compressed_narrative = compressed[-6:]
+
+    @staticmethod
+    def _compress_summary_fragment(summary: str) -> str:
+        cleaned = " ".join(part.strip() for part in summary.splitlines() if part.strip())
+        return cleaned[:80]
 
     @staticmethod
     def _contains_any(text: str, needles: tuple[str, ...]) -> bool:

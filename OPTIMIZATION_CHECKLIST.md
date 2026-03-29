@@ -21,11 +21,11 @@ This checklist tracks the post-open-source optimization path for `NovelWritingAg
 
 ## Phase 2: Memory and Canon Quality
 
-- [ ] Add embedding-based retrieval instead of relying only on heuristics and LLM selectors
-- [ ] Add long-horizon memory compression / summarization to control chapter growth
-- [ ] Introduce explicit token / prompt budgets instead of only character budgets
-- [ ] Upgrade canon patching from text notes to structured section-level updates
-- [ ] Add chapter-risk scoring to decide when deep review is required
+- [x] Add embedding-based retrieval instead of relying only on heuristics and LLM selectors
+- [x] Add long-horizon memory compression / summarization to control chapter growth
+- [x] Introduce explicit token / prompt budgets instead of only character budgets
+- [x] Upgrade canon patching from text notes to structured section-level updates
+- [x] Add chapter-risk scoring to decide when deep review is required
 
 ## Phase 3: Multi-Agent Collaboration
 

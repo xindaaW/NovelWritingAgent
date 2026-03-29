@@ -383,7 +383,10 @@ class StubSubAgent(BaseNovelSubAgent):
             return (
                 "Response format:\n"
                 "正文保持自然语言输出；如果方便，请在末尾追加一个 ```json``` 代码块，"
-                "至少包含 `summary`，如果建议改 canon 再补 `should_update_canon` 和 `canon_update_reason`。"
+                "至少包含 `summary`；如果建议改 canon，再补 `should_update_canon`、`canon_update_reason`，"
+                "以及结构化 `canon_patch`。`canon_patch` 可以是 object 或 list，推荐 keys: "
+                "`target_asset` (`story_outline` | `character_profiles` | `chapter_outline`), "
+                "`section_key` (string), `content` (string), `reason` (string)."
             )
         return ""
 
@@ -495,8 +498,12 @@ class StubSubAgent(BaseNovelSubAgent):
             metadata["summary"] = first_paragraph[:240] if first_paragraph else request.objective
         if request.task_kind.value == "revise":
             metadata["revision_applied"] = True
-            if payload and isinstance(payload.get("canon_patch"), str) and payload.get("canon_patch", "").strip():
-                metadata["canon_patch"] = payload["canon_patch"].strip()
+            if payload and "canon_patch" in payload:
+                patch = payload["canon_patch"]
+                if isinstance(patch, str) and patch.strip():
+                    metadata["canon_patch"] = patch.strip()
+                elif isinstance(patch, (dict, list)):
+                    metadata["canon_patch"] = patch
             elif request.metadata.get("deviation_action") == "update_canon":
                 metadata["canon_patch"] = f"Canon updated based on chapter {request.context.get('chapter_index', 'unknown')} creative deviation."
         return metadata
