@@ -8,7 +8,7 @@ This checklist tracks the post-open-source optimization path for `NovelWritingAg
 - [x] Keep `requirements.txt` as the single dependency source
 - [x] Add a public OSS license
 - [x] Clean generated artifacts from the repository surface
-- [ ] Create the public GitHub repository and push `main`
+- [x] Create the public GitHub repository and push `main`
 
 ## Phase 1: Robustness and Operability
 
