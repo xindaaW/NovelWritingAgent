@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "novel-writing-agent"
+version = "0.1.0"
+description = "Standalone multi-agent fiction writing system"
+readme = "README.md"
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+authors = [
+    {name = "Xinda Wang"}
+]
+license = {text = "MIT"}
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["novel_writing_agent*"]
+
+[tool.setuptools.package-data]
+novel_writing_agent = ["skills/**/*"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

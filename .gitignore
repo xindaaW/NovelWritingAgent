@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+workspace/
+config/config.yaml
+uv.lock
+.DS_Store
