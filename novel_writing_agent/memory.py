@@ -103,6 +103,7 @@ class MemoryOrchestrator:
             AgentRole.CHARACTER_REVIEWER,
             AgentRole.CONTINUITY_REVIEWER,
             AgentRole.STYLE_REVIEWER,
+            AgentRole.META_REVIEWER,
             AgentRole.CREATIVE_REVIEWER,
         }:
             bundle = WorkingMemoryBundle(
@@ -288,6 +289,7 @@ class MemoryOrchestrator:
             AgentRole.CHARACTER_REVIEWER,
             AgentRole.CONTINUITY_REVIEWER,
             AgentRole.STYLE_REVIEWER,
+            AgentRole.META_REVIEWER,
         } and chapter_index is not None:
             latest_feedback = state.draft.review_feedback_by_chapter.get(chapter_index, [])
             if latest_feedback:
@@ -306,6 +308,7 @@ class MemoryOrchestrator:
             AgentRole.CHARACTER_REVIEWER,
             AgentRole.CONTINUITY_REVIEWER,
             AgentRole.STYLE_REVIEWER,
+            AgentRole.META_REVIEWER,
             AgentRole.CHAPTER_CONVERGENCE,
         }:
             risk_profile = state.chapter_risk_profile(chapter_index)
@@ -350,6 +353,7 @@ class MemoryOrchestrator:
             AgentRole.CHARACTER_REVIEWER,
             AgentRole.CONTINUITY_REVIEWER,
             AgentRole.STYLE_REVIEWER,
+            AgentRole.META_REVIEWER,
         } and chapter_index is not None:
             current_draft = state.draft.chapter_drafts.get(chapter_index, "").strip()
             if current_draft:
@@ -371,6 +375,7 @@ class MemoryOrchestrator:
             AgentRole.CHARACTER_REVIEWER,
             AgentRole.CONTINUITY_REVIEWER,
             AgentRole.STYLE_REVIEWER,
+            AgentRole.META_REVIEWER,
             AgentRole.CHAPTER_CONVERGENCE,
             AgentRole.CHARACTER,
             AgentRole.CREATIVE_REVIEWER,
@@ -474,6 +479,7 @@ class MemoryOrchestrator:
             AgentRole.CHARACTER_REVIEWER,
             AgentRole.CONTINUITY_REVIEWER,
             AgentRole.STYLE_REVIEWER,
+            AgentRole.META_REVIEWER,
             AgentRole.CHAPTER_CONVERGENCE,
         }:
             query = self._section_query_text(state, chapter_index)
@@ -520,6 +526,7 @@ class MemoryOrchestrator:
             AgentRole.CHARACTER_REVIEWER,
             AgentRole.CONTINUITY_REVIEWER,
             AgentRole.STYLE_REVIEWER,
+            AgentRole.META_REVIEWER,
             AgentRole.CHAPTER_CONVERGENCE,
         }:
             query = self._section_query_text(state, chapter_index)
@@ -536,6 +543,8 @@ class MemoryOrchestrator:
             context.extend(state.memory.chapter_memory.get(chapter_index, [])[-2:])
         if role == AgentRole.CHARACTER_REVIEWER:
             context.extend(state.memory.character_memory[-3:])
+        if role == AgentRole.META_REVIEWER:
+            context.extend(state.memory.character_memory[-2:])
         return context[-12:] if risk_profile and risk_profile["deep_review"] else context[-10:]
 
     def _chapter_goal(self, state: NovelProjectState, chapter_index: int) -> str:
@@ -610,6 +619,7 @@ class MemoryOrchestrator:
             AgentRole.CHARACTER_REVIEWER,
             AgentRole.CONTINUITY_REVIEWER,
             AgentRole.STYLE_REVIEWER,
+            AgentRole.META_REVIEWER,
         }:
             return {}
 
@@ -822,6 +832,7 @@ class MemoryOrchestrator:
             AgentRole.CHARACTER_REVIEWER,
             AgentRole.CONTINUITY_REVIEWER,
             AgentRole.STYLE_REVIEWER,
+            AgentRole.META_REVIEWER,
             AgentRole.CHAPTER_CONVERGENCE,
         }:
             return {"plot_event", "foreshadowing", "reveal", "relationship_change", "character_state_change"}

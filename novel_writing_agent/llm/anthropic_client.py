@@ -161,19 +161,20 @@ class AnthropicClient(LLMClientBase):
 
             # For tool result messages
             elif msg.role == "tool":
-                # Anthropic uses user role with tool_result content blocks
-                api_messages.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": msg.tool_call_id,
-                                "content": msg.content,
-                            }
-                        ],
-                    }
-                )
+                tool_block = {
+                    "type": "tool_result",
+                    "tool_use_id": msg.tool_call_id,
+                    "content": msg.content,
+                }
+                # Anthropic expects tool results to directly follow the assistant tool_use turn.
+                # Group consecutive tool results into one synthetic user turn so the sequence
+                # stays valid even when the model requested multiple tools at once.
+                if api_messages and api_messages[-1]["role"] == "user" and isinstance(api_messages[-1]["content"], list):
+                    last_content = api_messages[-1]["content"]
+                    if last_content and all(isinstance(item, dict) and item.get("type") == "tool_result" for item in last_content):
+                        last_content.append(tool_block)
+                        continue
+                api_messages.append({"role": "user", "content": [tool_block]})
 
         return system_message, api_messages
 

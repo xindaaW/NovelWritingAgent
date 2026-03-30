@@ -39,6 +39,7 @@ class AgentRole(str, Enum):
     CHARACTER_REVIEWER = "character_reviewer"
     CONTINUITY_REVIEWER = "continuity_reviewer"
     STYLE_REVIEWER = "style_reviewer"
+    META_REVIEWER = "meta_reviewer"
     CHAPTER_CONVERGENCE = "chapter_convergence"
     PUBLISHING = "publishing"
 

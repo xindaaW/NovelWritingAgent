@@ -64,6 +64,14 @@ class StubSubAgent(BaseNovelSubAgent):
                 response = await self.llm_client.generate(messages)
             if tools and response.tool_calls:
                 for _ in range(4):
+                    messages.append(
+                        Message(
+                            role="assistant",
+                            content=response.content.strip() or "",
+                            thinking=response.thinking,
+                            tool_calls=response.tool_calls,
+                        )
+                    )
                     for tool_call in response.tool_calls:
                         tool_name = tool_call.function.name
                         arguments = tool_call.function.arguments
@@ -73,14 +81,6 @@ class StubSubAgent(BaseNovelSubAgent):
                         else:
                             result = await tool.execute(**arguments)
                             tool_content = result.content if result.success else result.error or "Tool failed"
-                        messages.append(
-                            Message(
-                                role="assistant",
-                                content=response.content.strip() or "",
-                                thinking=response.thinking,
-                                tool_calls=response.tool_calls,
-                            )
-                        )
                         messages.append(
                             Message(
                                 role="tool",
@@ -124,6 +124,24 @@ class StubSubAgent(BaseNovelSubAgent):
             ]
             should_update_canon = False
             metadata = {"deviation_signal": "minor"}
+            if self.role == AgentRole.META_REVIEWER:
+                board_feedback = request.context.get("reviewer_feedback", {})
+                merged_feedback: list[str] = []
+                for role_name in ("continuity_reviewer", "character_reviewer", "style_reviewer"):
+                    for item in board_feedback.get(role_name, []):
+                        if item not in merged_feedback:
+                            merged_feedback.append(item)
+                if not merged_feedback:
+                    merged_feedback = [
+                        "Prioritize continuity fixes first, then character clarity, then prose polish.",
+                        "Carry only issues that materially affect this chapter's quality.",
+                    ]
+                feedback = merged_feedback[:6]
+                should_update_canon = "update canon" in " ".join(merged_feedback).lower()
+                metadata = {
+                    "deviation_signal": "beneficial" if should_update_canon else "minor",
+                    "board_consensus": "meta-review merged reviewer feedback",
+                }
             if self.role == AgentRole.CONTINUITY_REVIEWER:
                 feedback = [
                     "Chapter drift detected: the scene introduces a new direction that is not in the current chapter plan.",
@@ -360,6 +378,7 @@ class StubSubAgent(BaseNovelSubAgent):
             AgentRole.CHARACTER_REVIEWER,
             AgentRole.CONTINUITY_REVIEWER,
             AgentRole.STYLE_REVIEWER,
+            AgentRole.META_REVIEWER,
         } and request.task_kind.value == "review":
             if working_memory.retrieval_index:
                 return [RetrieveMemoryTool(working_memory.retrieval_index)]

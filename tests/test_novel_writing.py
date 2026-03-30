@@ -1,15 +1,19 @@
 """Tests for the NovelWritingAgent framework skeleton."""
 
+import asyncio
 import json
+import time
 from pathlib import Path
 
 import pytest
 
 from novel_writing_agent import NovelMainAgent, NovelMode, NovelProjectState, NovelStage
 from novel_writing_agent.agents import WritingSubAgent
+from novel_writing_agent.llm import AnthropicClient
 from novel_writing_agent.ideation import IdeationCoordinator
 from novel_writing_agent.memory import MemoryOrchestrator, WorkingMemoryBundle
 from novel_writing_agent.models import AgentExecutionRequest, AgentExecutionResult, AgentRole, AgentTaskKind, CanonAsset
+from novel_writing_agent.schema import FunctionCall, Message, ToolCall
 from novel_writing_agent.storage import ProjectArtifactStore
 from novel_writing_agent.tools import RetrieveMemoryTool
 from novel_writing_agent.retry import RetryConfig as RuntimeRetryConfig, coerce_retry_config
@@ -117,10 +121,13 @@ async def test_drafting_review_revision_updates_memory_and_completes_chapter(tmp
     review_outputs = await agent.run_stage()
     assert any(item.startswith("risk_level=") for item in review_outputs)
     assert any(item.startswith("risk_score=") for item in review_outputs)
+    assert any(item.startswith("review_board=") for item in review_outputs)
+    assert any(item.startswith("meta_reviewer=") for item in review_outputs)
     assert state.draft.latest_feedback
     assert state.draft.review_feedback_by_chapter[1]
     assert (tmp_path / state.project_id / "outputs/chapters/chapter_001_review.md").exists()
     assert (tmp_path / state.project_id / "outputs/memory/character_reviewer_chapter_001.json").exists()
+    assert (tmp_path / state.project_id / "outputs/memory/meta_reviewer_chapter_001.json").exists()
 
     state.stage = NovelStage.REVISION
     revision_outputs = await agent.run_stage()
@@ -191,6 +198,41 @@ class FakeLLM:
         return Response(self.content)
 
 
+class FakeToolCallingLLM:
+    """Fake LLM that requests a tool once, then returns final text."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def generate(self, messages, tools=None):
+        self.calls.append(messages)
+
+        class Response:
+            def __init__(self, content="", tool_calls=None):
+                self.content = content
+                self.thinking = None
+                self.tool_calls = tool_calls
+
+        if len(self.calls) == 1:
+            return Response(
+                content="需要先检索记忆。",
+                tool_calls=[
+                    ToolCall(
+                        id="toolu_1",
+                        type="function",
+                        function=FunctionCall(
+                            name="retrieve_memory",
+                            arguments={
+                                "level": "immediate",
+                                "memory_type": "canon",
+                            },
+                        ),
+                    )
+                ],
+            )
+        return Response(content="最终正文。", tool_calls=None)
+
+
 @pytest.mark.asyncio
 async def test_llm_backed_agent_uses_freeform_output_with_lightweight_parsing():
     """LLM-backed sub-agents should remain skill-driven and tolerate freeform output."""
@@ -219,6 +261,81 @@ This is a stronger direction and we may want to update canon in the next round.
     assert "Keep the secondary character sharper." in result.feedback
     assert result.should_update_canon is True
     assert result.metadata["summary"].startswith("Chapter 1 prose")
+
+
+@pytest.mark.asyncio
+async def test_tool_call_roundtrip_appends_assistant_tool_use_once():
+    """A tool-use turn should add one assistant tool-call message followed by tool results."""
+    retrieval_index = {
+        "immediate": {
+            "canon": [
+                {"id": "canon_001", "summary": "设定摘要", "body": "设定正文", "source": "canon.current"}
+            ]
+        }
+    }
+    llm = FakeToolCallingLLM()
+    agent = WritingSubAgent(
+        role=AgentRole.WRITER,
+        system_prompt="Writer system prompt",
+        llm_client=llm,
+    )
+
+    result = await agent.execute(
+        request=AgentExecutionRequest(
+            role=agent.role,
+            task_kind=AgentTaskKind.GENERATE,
+            objective="Write chapter 1",
+        ),
+        working_memory=WorkingMemoryBundle(retrieval_index=retrieval_index),
+    )
+
+    second_turn_messages = llm.calls[1]
+    assistant_tool_turns = [
+        msg for msg in second_turn_messages if msg.role == "assistant" and msg.tool_calls
+    ]
+    tool_results = [msg for msg in second_turn_messages if msg.role == "tool"]
+
+    assert result.output == "最终正文。"
+    assert len(assistant_tool_turns) == 1
+    assert len(tool_results) == 1
+    assert tool_results[0].tool_call_id == "toolu_1"
+
+
+def test_anthropic_message_conversion_groups_consecutive_tool_results():
+    """Anthropic conversion should keep one assistant tool_use turn followed by grouped tool_result blocks."""
+    client = AnthropicClient(api_key="test-key")
+    system, api_messages = client._convert_messages(
+        [
+            Message(role="system", content="system"),
+            Message(role="user", content="user"),
+            Message(
+                role="assistant",
+                content="需要工具。",
+                tool_calls=[
+                    ToolCall(
+                        id="toolu_1",
+                        type="function",
+                        function=FunctionCall(name="retrieve_memory", arguments={"level": "immediate"}),
+                    ),
+                    ToolCall(
+                        id="toolu_2",
+                        type="function",
+                        function=FunctionCall(name="retrieve_memory", arguments={"level": "deep"}),
+                    ),
+                ],
+            ),
+            Message(role="tool", content="结果1", tool_call_id="toolu_1", name="retrieve_memory"),
+            Message(role="tool", content="结果2", tool_call_id="toolu_2", name="retrieve_memory"),
+        ]
+    )
+
+    assert system == "system"
+    assert len(api_messages) == 3
+    assert api_messages[1]["role"] == "assistant"
+    assert api_messages[2]["role"] == "user"
+    assert len(api_messages[2]["content"]) == 2
+    assert api_messages[2]["content"][0]["tool_use_id"] == "toolu_1"
+    assert api_messages[2]["content"][1]["tool_use_id"] == "toolu_2"
 
 
 def test_ideation_normalizer_keeps_clean_canon(tmp_path: Path):
@@ -919,6 +1036,69 @@ async def test_high_risk_chapter_expands_review_memory_scope():
     assert profile["deep_review"] is True
     assert profile["score"] >= 4
     assert len(bundle.review_context) >= 6
+
+
+@pytest.mark.asyncio
+async def test_reviewer_board_runs_in_parallel_and_meta_reviewer_merges(tmp_path: Path):
+    """The chapter review stage should parallelize primary reviewers and then run a meta-review pass."""
+    state = NovelProjectState(
+        project_id="parallel-board",
+        title="Parallel Board",
+        user_brief="brief",
+        mode=NovelMode.SHORT,
+    )
+    agent = NovelMainAgent(state, artifact_workspace_root=tmp_path)
+    state.update_canon_asset(CanonAsset.CHAPTER_OUTLINE, "第1章：起点。")
+    state.freeze_asset(CanonAsset.STORY_OUTLINE)
+    state.freeze_asset(CanonAsset.CHARACTER_PROFILES)
+    state.freeze_asset(CanonAsset.CHAPTER_OUTLINE)
+    state.store_chapter_draft(1, "正文")
+    state.stage = NovelStage.REVIEW
+
+    class SlowReviewer:
+        def __init__(self, role: AgentRole, feedback: str):
+            self.role = role
+            self.feedback = feedback
+
+        async def execute(self, request, working_memory):
+            await asyncio.sleep(0.12)
+            return AgentExecutionResult(
+                role=self.role,
+                task_kind=request.task_kind,
+                output=f"{self.role.value}: {self.feedback}",
+                feedback=[self.feedback],
+                should_update_canon=self.role == AgentRole.CONTINUITY_REVIEWER,
+            )
+
+    class MetaReviewer:
+        async def execute(self, request, working_memory):
+            board = request.context["reviewer_feedback"]
+            merged = []
+            for role_name, items in board.items():
+                for item in items:
+                    merged.append(f"{role_name}:{item}")
+            return AgentExecutionResult(
+                role=AgentRole.META_REVIEWER,
+                task_kind=request.task_kind,
+                output="meta review merged",
+                feedback=merged[:4],
+                should_update_canon=True,
+            )
+
+    agent.registry._agents[AgentRole.CHARACTER_REVIEWER] = SlowReviewer(AgentRole.CHARACTER_REVIEWER, "人物问题")
+    agent.registry._agents[AgentRole.CONTINUITY_REVIEWER] = SlowReviewer(AgentRole.CONTINUITY_REVIEWER, "连续性问题")
+    agent.registry._agents[AgentRole.STYLE_REVIEWER] = SlowReviewer(AgentRole.STYLE_REVIEWER, "风格问题")
+    agent.registry._agents[AgentRole.META_REVIEWER] = MetaReviewer()
+
+    started = time.perf_counter()
+    outputs = await agent.run_stage()
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.30
+    assert any(item == "review_board=3" for item in outputs)
+    assert any(item == "meta_reviewer=meta_reviewer" for item in outputs)
+    assert state.draft.latest_feedback
+    assert any("continuity_reviewer" in item for item in state.draft.latest_feedback)
 
 
 @pytest.mark.asyncio

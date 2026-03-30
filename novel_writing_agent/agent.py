@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -211,35 +212,48 @@ class NovelMainAgent:
         chapter_goal = self._chapter_goal(current_chapter)
         risk_profile = self.state.chapter_risk_profile(current_chapter)
         self.log_progress(f"Reviewing chapter {current_chapter}.")
-        aggregated_feedback: list[str] = []
-        canon_change_votes = 0
-        for role in (
-            AgentRole.CHARACTER_REVIEWER,
-            AgentRole.CONTINUITY_REVIEWER,
-            AgentRole.STYLE_REVIEWER,
-        ):
-            request = AgentExecutionRequest(
-                role=role,
-                task_kind=AgentTaskKind.REVIEW,
-                objective=f"Review chapter {current_chapter} against canon and project constraints.",
-                context={
-                    "chapter_index": current_chapter,
-                    "main_snapshot": self.clean_context(),
-                    "chapter_goal": chapter_goal,
-                    "chapter_risk": risk_profile,
+        board_results = await self._run_reviewer_board(current_chapter, chapter_goal, risk_profile)
+        outputs.extend(result.output for result in board_results.values())
+        reviewer_feedback = {
+            role.value: result.feedback
+            for role, result in board_results.items()
+        }
+        meta_request = AgentExecutionRequest(
+            role=AgentRole.META_REVIEWER,
+            task_kind=AgentTaskKind.REVIEW,
+            objective=f"Merge the reviewer board findings for chapter {current_chapter} into one prioritized editorial decision.",
+            context={
+                "chapter_index": current_chapter,
+                "main_snapshot": self.clean_context(),
+                "chapter_goal": chapter_goal,
+                "chapter_risk": risk_profile,
+                "reviewer_outputs": {
+                    role.value: result.output
+                    for role, result in board_results.items()
                 },
-                constraints=[
-                    "Flag concrete issues, not vague critiques.",
-                    "If deviation is beneficial, explain why canon should change.",
-                    "If the chapter risk is medium or high, be extra strict about continuity and unresolved issues.",
-                ],
-                expected_output="Review findings in Chinese with clear actionable feedback.",
-            )
-            result = await self.dispatch_result(role, request, chapter_index=current_chapter)
-            aggregated_feedback.extend(result.feedback)
-            if result.should_update_canon:
-                canon_change_votes += 1
-            outputs.append(result.output)
+                "reviewer_feedback": reviewer_feedback,
+            },
+            constraints=[
+                "Merge overlapping findings and remove duplicates.",
+                "Preserve disagreements when they materially affect the chapter plan.",
+                "Return a prioritized merged review board decision.",
+            ],
+            expected_output="A merged Chinese review board summary with prioritized actionable feedback.",
+        )
+        meta_result = await self.dispatch_result(
+            AgentRole.META_REVIEWER,
+            meta_request,
+            chapter_index=current_chapter,
+        )
+        outputs.append(meta_result.output)
+        aggregated_feedback = meta_result.feedback or [
+            item
+            for result in board_results.values()
+            for item in result.feedback
+        ]
+        canon_change_votes = sum(1 for result in board_results.values() if result.should_update_canon)
+        if meta_result.should_update_canon:
+            canon_change_votes += 1
         if not aggregated_feedback:
             aggregated_feedback = ["审核未返回有效反馈；保持当前版本并在下一轮继续复核。"]
         self.state.add_review_feedback(current_chapter, aggregated_feedback)
@@ -269,6 +283,8 @@ class NovelMainAgent:
             f"goal={chapter_goal or '未找到章节目标'}",
             f"risk_level={risk_profile['level']}",
             f"risk_score={risk_profile['score']}",
+            f"review_board={len(board_results)}",
+            f"meta_reviewer={AgentRole.META_REVIEWER.value}",
             f"review_path={review_path}",
             f"notes_path={notes_path}",
             f"next_action={action.value}",
@@ -416,6 +432,46 @@ class NovelMainAgent:
         output_size = len(result.output.strip())
         self.log_progress(f"Completed {role.value}: {task_desc} ({output_size} chars)")
         return result
+
+    async def _run_reviewer_board(
+        self,
+        chapter_index: int,
+        chapter_goal: str,
+        risk_profile: dict[str, object],
+    ) -> dict[AgentRole, AgentExecutionResult]:
+        """Run the primary reviewer board in parallel before meta-review synthesis."""
+        board_roles = (
+            AgentRole.CHARACTER_REVIEWER,
+            AgentRole.CONTINUITY_REVIEWER,
+            AgentRole.STYLE_REVIEWER,
+        )
+        tasks = []
+        for role in board_roles:
+            request = AgentExecutionRequest(
+                role=role,
+                task_kind=AgentTaskKind.REVIEW,
+                objective=f"Review chapter {chapter_index} against canon and project constraints.",
+                context={
+                    "chapter_index": chapter_index,
+                    "main_snapshot": self.clean_context(),
+                    "chapter_goal": chapter_goal,
+                    "chapter_risk": risk_profile,
+                    "review_board_roles": [item.value for item in board_roles],
+                },
+                constraints=[
+                    "Flag concrete issues, not vague critiques.",
+                    "If deviation is beneficial, explain why canon should change.",
+                    "Assume your feedback will be merged with the other reviewers into one editorial board decision.",
+                    "If the chapter risk is medium or high, be extra strict about continuity and unresolved issues.",
+                ],
+                expected_output="Review findings in Chinese with clear actionable feedback.",
+            )
+            tasks.append(self.dispatch_result(role, request, chapter_index=chapter_index))
+        results = await asyncio.gather(*tasks)
+        return {
+            role: result
+            for role, result in zip(board_roles, results, strict=False)
+        }
 
     def _resolve_deviation_action(
         self,
@@ -744,6 +800,16 @@ class NovelMainAgent:
             WritingSubAgent(
                 AgentRole.STYLE_REVIEWER,
                 "Style review agent",
+                skill_dir=skills_dir / "reviewer-agent",
+                llm_client=self.llm_client,
+            ),
+            "writing",
+        )
+        self.registry.register(
+            AgentRole.META_REVIEWER,
+            WritingSubAgent(
+                AgentRole.META_REVIEWER,
+                "Meta review synthesis agent",
                 skill_dir=skills_dir / "reviewer-agent",
                 llm_client=self.llm_client,
             ),

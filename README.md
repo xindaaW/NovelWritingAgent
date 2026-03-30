@@ -8,6 +8,7 @@
 - prompt 级 memory budget 控制与风险感知审核
 - 本地语义检索 fallback 与 long-horizon memory 压缩
 - 结构化 `canon_patch`，支持章节修订反向更新 canon
+- reviewer board 并行评审与 `meta_reviewer` 汇总
 - 项目状态落盘与按 `project_id` 恢复续写
 - 无模型骨架调试和接入真实 LLM 的两种运行模式
 

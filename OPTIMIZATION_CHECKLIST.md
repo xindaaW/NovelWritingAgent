@@ -29,9 +29,9 @@ This checklist tracks the post-open-source optimization path for `NovelWritingAg
 
 ## Phase 3: Multi-Agent Collaboration
 
-- [ ] Add a meta-reviewer that merges character / continuity / style findings
+- [x] Add a meta-reviewer that merges character / continuity / style findings
 - [ ] Let reviewers cross-reference one another instead of acting as isolated critics
-- [ ] Add selective parallelism for independent reviewer steps
+- [x] Add selective parallelism for independent reviewer steps
 - [ ] Add explicit cost / latency budgets per stage and per chapter
 - [ ] Strengthen the publishing stage beyond placeholder packaging behavior
 
