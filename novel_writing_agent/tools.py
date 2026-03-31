@@ -61,11 +61,16 @@ class RetrieveMemoryTool(Tool):
         limit: int = 4,
         reveal: str = "summary",
     ) -> ToolResult:
+        level = str(level or "").strip()
+        memory_type = str(memory_type or "").strip()
+        focus = str(focus or "").strip().lower()
+        reveal = self._normalize_reveal(reveal)
+        safe_limit = self._coerce_limit(limit)
+
         pool = self.retrieval_index.get(level, {}).get(memory_type, [])
         if not pool:
             return ToolResult(success=True, content="未检索到可用 memory。")
 
-        focus = (focus or "").strip().lower()
         items = pool
         if focus:
             ranked = [
@@ -78,7 +83,7 @@ class RetrieveMemoryTool(Tool):
             if ranked:
                 items = ranked
 
-        chosen = items[: max(1, min(limit, 8))]
+        chosen = items[:safe_limit]
         lines = [f"[{level}/{memory_type}/{reveal}]"]
         for item in chosen:
             summary = item.get("summary", "").strip()
@@ -96,3 +101,19 @@ class RetrieveMemoryTool(Tool):
                     bullet += f" [{source}]"
                 lines.append(bullet)
         return ToolResult(success=True, content="\n".join(lines))
+
+    @staticmethod
+    def _coerce_limit(limit: int | str | None) -> int:
+        """Clamp model-supplied limits so tool calls stay resilient to loose typing."""
+        if isinstance(limit, bool):
+            return 1
+        try:
+            normalized = int(limit) if limit is not None else 4
+        except (TypeError, ValueError):
+            normalized = 4
+        return max(1, min(normalized, 8))
+
+    @staticmethod
+    def _normalize_reveal(reveal: str | None) -> str:
+        normalized = str(reveal or "summary").strip().lower()
+        return normalized if normalized in {"summary", "detail"} else "summary"

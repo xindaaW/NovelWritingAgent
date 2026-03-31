@@ -474,6 +474,33 @@ async def test_writer_memory_bundle_exposes_progressive_retrieval_layers():
 
 
 @pytest.mark.asyncio
+async def test_retrieve_memory_tool_coerces_string_limit_from_model_calls():
+    """Tool calls should tolerate model-supplied numeric strings instead of crashing."""
+    retrieval_index = {
+        "contextual": {
+            "narrative": [
+                {"id": "n1", "summary": "家族覆灭", "body": "第一条", "source": "summary.1"},
+                {"id": "n2", "summary": "流亡求生", "body": "第二条", "source": "summary.2"},
+                {"id": "n3", "summary": "旧敌重逢", "body": "第三条", "source": "summary.3"},
+            ]
+        }
+    }
+    tool = RetrieveMemoryTool(retrieval_index)
+
+    result = await tool.execute(
+        level="contextual",
+        memory_type="narrative",
+        focus="",
+        limit="2",
+        reveal="DETAIL",
+    )
+
+    assert result.success is True
+    assert result.content.count("- 摘要：") == 2
+    assert "[contextual/narrative/detail]" in result.content
+
+
+@pytest.mark.asyncio
 async def test_reviewer_memory_bundle_exposes_progressive_retrieval_layers():
     """Reviewer should also receive the retrieval tool index for progressive checking."""
     state = NovelProjectState(
